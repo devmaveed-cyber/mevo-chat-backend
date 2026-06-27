@@ -1,7 +1,21 @@
 const callService = require('../services/callService');
+const registerChatSocket = require('../socket');
 
 const initiateCall = async (req, res) => {
   const payload = await callService.initiateCall(req.user._id, req.body);
+  const callLog = payload.call;
+
+  registerChatSocket.notifyCallInvite(
+    req.body.receiverId,
+    {
+      callId: callLog._id.toString(),
+      channelName: payload.channelName,
+      callType: callLog.callType,
+      conversationId: payload.conversationId.toString(),
+    },
+    req.user
+  );
+
   res.status(201).json({ success: true, data: payload });
 };
 

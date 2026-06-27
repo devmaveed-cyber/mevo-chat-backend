@@ -5,6 +5,42 @@ const chatService = require('../services/chatService');
 const SOCKET_EVENTS = require('../constants/socketEvents');
 
 const onlineUsers = new Map();
+let ioRef = null;
+
+const normalizeUserId = (userId) => userId?.toString?.() ?? String(userId);
+
+const getReceiverSocketId = (userId) => onlineUsers.get(normalizeUserId(userId));
+
+const emitToUser = (userId, event, payload) => {
+  const socketId = getReceiverSocketId(userId);
+  if (!socketId || !ioRef) return false;
+  ioRef.to(socketId).emit(event, payload);
+  return true;
+};
+
+const buildCallerPayload = (user) => ({
+  id: normalizeUserId(user._id || user.id),
+  name: user.name,
+  avatarUrl: user.avatarUrl || '',
+});
+
+const notifyCallInvite = (receiverId, call, caller) =>
+  emitToUser(receiverId, SOCKET_EVENTS.CALL_INVITE, {
+    ...call,
+    caller: buildCallerPayload(caller),
+  });
+
+const notifyCallAccept = (callerId, call) =>
+  emitToUser(callerId, SOCKET_EVENTS.CALL_ACCEPT, call);
+
+const notifyCallReject = (callerId, call) =>
+  emitToUser(callerId, SOCKET_EVENTS.CALL_REJECT, call);
+
+const notifyCallCancel = (receiverId, call) =>
+  emitToUser(receiverId, SOCKET_EVENTS.CALL_CANCEL, call);
+
+const notifyCallEnd = (peerId, call) =>
+  emitToUser(peerId, SOCKET_EVENTS.CALL_END, call);
 
 const serializeMessage = (message) => ({
   id: message._id,
@@ -22,6 +58,8 @@ const serializeMessage = (message) => ({
 });
 
 const registerChatSocket = (io) => {
+  ioRef = io;
+
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth?.token;
@@ -45,7 +83,7 @@ const registerChatSocket = (io) => {
   });
 
   io.on('connection', async (socket) => {
-    const userId = socket.user._id.toString();
+    const userId = normalizeUserId(socket.user._id);
     onlineUsers.set(userId, socket.id);
 
     await User.findByIdAndUpdate(userId, {
@@ -73,14 +111,10 @@ const registerChatSocket = (io) => {
         });
 
         const serialized = serializeMessage(message);
-        const receiverId = serialized.receiverId.toString();
+        const receiverId = normalizeUserId(serialized.receiverId);
 
         io.to(userId).emit(SOCKET_EVENTS.MESSAGE_SENT, serialized);
-
-        const receiverSocketId = onlineUsers.get(receiverId);
-        if (receiverSocketId) {
-          io.to(receiverSocketId).emit(SOCKET_EVENTS.MESSAGE_DELIVERED, serialized);
-        }
+        emitToUser(receiverId, SOCKET_EVENTS.MESSAGE_DELIVERED, serialized);
 
         if (typeof callback === 'function') {
           callback({ success: true, data: serialized });
@@ -103,14 +137,11 @@ const registerChatSocket = (io) => {
         const otherUserId = conversation.participant?.id?.toString();
 
         if (otherUserId) {
-          const otherSocketId = onlineUsers.get(otherUserId);
-          if (otherSocketId) {
-            io.to(otherSocketId).emit(SOCKET_EVENTS.MESSAGE_READ, {
-              conversationId,
-              readBy: userId,
-              readAt: result.readAt,
-            });
-          }
+          emitToUser(otherUserId, SOCKET_EVENTS.MESSAGE_READ, {
+            conversationId,
+            readBy: userId,
+            readAt: result.readAt,
+          });
         }
       } catch {
         // ignore invalid read events
@@ -121,83 +152,51 @@ const registerChatSocket = (io) => {
       const { conversationId, receiverId } = payload || {};
       if (!receiverId) return;
 
-      const receiverSocketId = onlineUsers.get(receiverId.toString());
-      if (receiverSocketId) {
-        io.to(receiverSocketId).emit(SOCKET_EVENTS.TYPING, {
-          conversationId,
-          userId,
-        });
-      }
+      emitToUser(receiverId, SOCKET_EVENTS.TYPING, {
+        conversationId,
+        userId,
+      });
     });
 
     socket.on(SOCKET_EVENTS.STOP_TYPING, (payload) => {
       const { conversationId, receiverId } = payload || {};
       if (!receiverId) return;
 
-      const receiverSocketId = onlineUsers.get(receiverId.toString());
-      if (receiverSocketId) {
-        io.to(receiverSocketId).emit(SOCKET_EVENTS.STOP_TYPING, {
-          conversationId,
-          userId,
-        });
-      }
+      emitToUser(receiverId, SOCKET_EVENTS.STOP_TYPING, {
+        conversationId,
+        userId,
+      });
     });
 
     socket.on(SOCKET_EVENTS.CALL_INVITE, (payload) => {
       const { receiverId, call } = payload || {};
       if (!receiverId || !call) return;
 
-      const receiverSocketId = onlineUsers.get(receiverId.toString());
-      if (receiverSocketId) {
-        io.to(receiverSocketId).emit(SOCKET_EVENTS.CALL_INVITE, {
-          ...call,
-          caller: {
-            id: socket.user._id,
-            name: socket.user.name,
-            avatarUrl: socket.user.avatarUrl,
-          },
-        });
-      }
+      notifyCallInvite(receiverId, call, socket.user);
     });
 
     socket.on(SOCKET_EVENTS.CALL_ACCEPT, (payload) => {
       const { callerId, call } = payload || {};
       if (!callerId || !call) return;
-
-      const callerSocketId = onlineUsers.get(callerId.toString());
-      if (callerSocketId) {
-        io.to(callerSocketId).emit(SOCKET_EVENTS.CALL_ACCEPT, call);
-      }
+      notifyCallAccept(callerId, call);
     });
 
     socket.on(SOCKET_EVENTS.CALL_REJECT, (payload) => {
       const { callerId, call } = payload || {};
       if (!callerId || !call) return;
-
-      const callerSocketId = onlineUsers.get(callerId.toString());
-      if (callerSocketId) {
-        io.to(callerSocketId).emit(SOCKET_EVENTS.CALL_REJECT, call);
-      }
+      notifyCallReject(callerId, call);
     });
 
     socket.on(SOCKET_EVENTS.CALL_CANCEL, (payload) => {
       const { receiverId, call } = payload || {};
       if (!receiverId || !call) return;
-
-      const receiverSocketId = onlineUsers.get(receiverId.toString());
-      if (receiverSocketId) {
-        io.to(receiverSocketId).emit(SOCKET_EVENTS.CALL_CANCEL, call);
-      }
+      notifyCallCancel(receiverId, call);
     });
 
     socket.on(SOCKET_EVENTS.CALL_END, (payload) => {
       const { peerId, call } = payload || {};
       if (!peerId || !call) return;
-
-      const peerSocketId = onlineUsers.get(peerId.toString());
-      if (peerSocketId) {
-        io.to(peerSocketId).emit(SOCKET_EVENTS.CALL_END, call);
-      }
+      notifyCallEnd(peerId, call);
     });
 
     socket.on('disconnect', async () => {
@@ -215,5 +214,12 @@ const registerChatSocket = (io) => {
     });
   });
 };
+
+registerChatSocket.notifyCallInvite = notifyCallInvite;
+registerChatSocket.notifyCallAccept = notifyCallAccept;
+registerChatSocket.notifyCallReject = notifyCallReject;
+registerChatSocket.notifyCallCancel = notifyCallCancel;
+registerChatSocket.notifyCallEnd = notifyCallEnd;
+registerChatSocket.isUserOnline = (userId) => onlineUsers.has(normalizeUserId(userId));
 
 module.exports = registerChatSocket;

@@ -1,5 +1,5 @@
 const sanitizeUser = (user) => ({
-  id: user._id,
+  id: user._id?.toString?.() ?? String(user._id),
   name: user.name,
   email: user.email,
   phone: user.phone || '',

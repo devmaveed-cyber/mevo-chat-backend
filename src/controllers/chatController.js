@@ -6,7 +6,12 @@ const startConversation = async (req, res) => {
     req.body.participantId
   );
 
-  res.status(200).json({ success: true, data: conversation });
+  const formatted = await chatService.getConversationById(
+    req.user._id,
+    conversation._id
+  );
+
+  res.status(200).json({ success: true, data: formatted });
 };
 
 const listConversations = async (req, res) => {
