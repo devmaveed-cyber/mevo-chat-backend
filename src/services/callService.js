@@ -3,6 +3,20 @@ const CallLog = require('../models/CallLog');
 const ApiError = require('../utils/ApiError');
 const chatService = require('./chatService');
 
+const RINGING_WINDOW_MS = 45000;
+
+const buildCallInvitePayload = (callLog, caller) => ({
+  callId: callLog._id.toString(),
+  channelName: callLog.channelName,
+  callType: callLog.callType,
+  conversationId: callLog.conversationId.toString(),
+  caller: {
+    id: caller._id?.toString?.() ?? caller.id?.toString?.() ?? String(caller),
+    name: caller.name,
+    avatarUrl: caller.avatarUrl || '',
+  },
+});
+
 const buildChannelName = (callerId, receiverId) => {
   const hash = crypto
     .createHash('sha256')
@@ -74,6 +88,20 @@ const updateCallStatus = async (currentUserId, { callId, status }) => {
   return callLog;
 };
 
+const getPendingIncomingCalls = async (receiverId) => {
+  const minCreatedAt = new Date(Date.now() - RINGING_WINDOW_MS);
+
+  const calls = await CallLog.find({
+    receiverId,
+    status: 'ringing',
+    createdAt: { $gte: minCreatedAt },
+  })
+    .sort({ createdAt: -1 })
+    .populate('callerId', 'name avatarUrl');
+
+  return calls.map((call) => buildCallInvitePayload(call, call.callerId));
+};
+
 const listCallHistory = async (currentUserId) => {
   const calls = await CallLog.find({
     $or: [{ callerId: currentUserId }, { receiverId: currentUserId }],
@@ -102,7 +130,9 @@ const listCallHistory = async (currentUserId) => {
 };
 
 module.exports = {
+  buildCallInvitePayload,
   initiateCall,
   updateCallStatus,
+  getPendingIncomingCalls,
   listCallHistory,
 };

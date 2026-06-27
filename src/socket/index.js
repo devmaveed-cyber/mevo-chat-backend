@@ -2,19 +2,20 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const env = require('../config/env');
 const chatService = require('../services/chatService');
+const callService = require('../services/callService');
 const SOCKET_EVENTS = require('../constants/socketEvents');
 
-const onlineUsers = new Map();
 let ioRef = null;
 
 const normalizeUserId = (userId) => userId?.toString?.() ?? String(userId);
+const userRoom = (userId) => `user:${normalizeUserId(userId)}`;
 
-const getReceiverSocketId = (userId) => onlineUsers.get(normalizeUserId(userId));
-
-const emitToUser = (userId, event, payload) => {
-  const socketId = getReceiverSocketId(userId);
-  if (!socketId || !ioRef) return false;
-  ioRef.to(socketId).emit(event, payload);
+const emitToUser = async (userId, event, payload) => {
+  if (!ioRef) return false;
+  const room = userRoom(userId);
+  const sockets = await ioRef.in(room).fetchSockets();
+  if (!sockets.length) return false;
+  ioRef.to(room).emit(event, payload);
   return true;
 };
 
@@ -24,23 +25,31 @@ const buildCallerPayload = (user) => ({
   avatarUrl: user.avatarUrl || '',
 });
 
-const notifyCallInvite = (receiverId, call, caller) =>
-  emitToUser(receiverId, SOCKET_EVENTS.CALL_INVITE, {
-    ...call,
-    caller: buildCallerPayload(caller),
-  });
+const notifyCallInvite = (receiverId, invite) =>
+  emitToUser(receiverId, SOCKET_EVENTS.CALL_INVITE, invite);
 
-const notifyCallAccept = (callerId, call) =>
-  emitToUser(callerId, SOCKET_EVENTS.CALL_ACCEPT, call);
+const notifyCallAccept = (callerId, call) => {
+  void emitToUser(callerId, SOCKET_EVENTS.CALL_ACCEPT, call);
+};
 
-const notifyCallReject = (callerId, call) =>
-  emitToUser(callerId, SOCKET_EVENTS.CALL_REJECT, call);
+const notifyCallReject = (callerId, call) => {
+  void emitToUser(callerId, SOCKET_EVENTS.CALL_REJECT, call);
+};
 
-const notifyCallCancel = (receiverId, call) =>
-  emitToUser(receiverId, SOCKET_EVENTS.CALL_CANCEL, call);
+const notifyCallCancel = (receiverId, call) => {
+  void emitToUser(receiverId, SOCKET_EVENTS.CALL_CANCEL, call);
+};
 
-const notifyCallEnd = (peerId, call) =>
-  emitToUser(peerId, SOCKET_EVENTS.CALL_END, call);
+const notifyCallEnd = (peerId, call) => {
+  void emitToUser(peerId, SOCKET_EVENTS.CALL_END, call);
+};
+
+const deliverPendingCalls = async (userId, socket) => {
+  const pending = await callService.getPendingIncomingCalls(userId);
+  for (const invite of pending) {
+    socket.emit(SOCKET_EVENTS.CALL_INVITE, invite);
+  }
+};
 
 const serializeMessage = (message) => ({
   id: message._id,
@@ -84,12 +93,18 @@ const registerChatSocket = (io) => {
 
   io.on('connection', async (socket) => {
     const userId = normalizeUserId(socket.user._id);
-    onlineUsers.set(userId, socket.id);
+    socket.join(userRoom(userId));
 
     await User.findByIdAndUpdate(userId, {
       isOnline: true,
       lastSeenAt: new Date(),
     });
+
+    try {
+      await deliverPendingCalls(userId, socket);
+    } catch {
+      // ignore pending call delivery errors
+    }
 
     socket.broadcast.emit(SOCKET_EVENTS.USER_ONLINE, {
       userId,
@@ -113,8 +128,8 @@ const registerChatSocket = (io) => {
         const serialized = serializeMessage(message);
         const receiverId = normalizeUserId(serialized.receiverId);
 
-        io.to(userId).emit(SOCKET_EVENTS.MESSAGE_SENT, serialized);
-        emitToUser(receiverId, SOCKET_EVENTS.MESSAGE_DELIVERED, serialized);
+        socket.emit(SOCKET_EVENTS.MESSAGE_SENT, serialized);
+        void emitToUser(receiverId, SOCKET_EVENTS.MESSAGE_DELIVERED, serialized);
 
         if (typeof callback === 'function') {
           callback({ success: true, data: serialized });
@@ -137,7 +152,7 @@ const registerChatSocket = (io) => {
         const otherUserId = conversation.participant?.id?.toString();
 
         if (otherUserId) {
-          emitToUser(otherUserId, SOCKET_EVENTS.MESSAGE_READ, {
+          void emitToUser(otherUserId, SOCKET_EVENTS.MESSAGE_READ, {
             conversationId,
             readBy: userId,
             readAt: result.readAt,
@@ -152,7 +167,7 @@ const registerChatSocket = (io) => {
       const { conversationId, receiverId } = payload || {};
       if (!receiverId) return;
 
-      emitToUser(receiverId, SOCKET_EVENTS.TYPING, {
+      void emitToUser(receiverId, SOCKET_EVENTS.TYPING, {
         conversationId,
         userId,
       });
@@ -162,7 +177,7 @@ const registerChatSocket = (io) => {
       const { conversationId, receiverId } = payload || {};
       if (!receiverId) return;
 
-      emitToUser(receiverId, SOCKET_EVENTS.STOP_TYPING, {
+      void emitToUser(receiverId, SOCKET_EVENTS.STOP_TYPING, {
         conversationId,
         userId,
       });
@@ -172,7 +187,10 @@ const registerChatSocket = (io) => {
       const { receiverId, call } = payload || {};
       if (!receiverId || !call) return;
 
-      notifyCallInvite(receiverId, call, socket.user);
+      void notifyCallInvite(receiverId, {
+        ...call,
+        caller: buildCallerPayload(socket.user),
+      });
     });
 
     socket.on(SOCKET_EVENTS.CALL_ACCEPT, (payload) => {
@@ -200,8 +218,6 @@ const registerChatSocket = (io) => {
     });
 
     socket.on('disconnect', async () => {
-      onlineUsers.delete(userId);
-
       await User.findByIdAndUpdate(userId, {
         isOnline: false,
         lastSeenAt: new Date(),
@@ -220,6 +236,10 @@ registerChatSocket.notifyCallAccept = notifyCallAccept;
 registerChatSocket.notifyCallReject = notifyCallReject;
 registerChatSocket.notifyCallCancel = notifyCallCancel;
 registerChatSocket.notifyCallEnd = notifyCallEnd;
-registerChatSocket.isUserOnline = (userId) => onlineUsers.has(normalizeUserId(userId));
+registerChatSocket.isUserOnline = async (userId) => {
+  if (!ioRef) return false;
+  const sockets = await ioRef.in(userRoom(userId)).fetchSockets();
+  return sockets.length > 0;
+};
 
 module.exports = registerChatSocket;

@@ -90,6 +90,7 @@ router.patch(
 );
 
 router.get('/calls/history', protect, asyncHandler(callController.listCallHistory));
+router.get('/calls/pending', protect, asyncHandler(callController.getPendingCalls));
 router.post(
   '/calls/initiate',
   protect,

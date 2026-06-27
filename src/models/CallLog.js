@@ -54,4 +54,6 @@ const callLogSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+callLogSchema.index({ receiverId: 1, status: 1, createdAt: -1 });
+
 module.exports = mongoose.model('CallLog', callLogSchema);
